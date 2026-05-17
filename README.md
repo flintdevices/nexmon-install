@@ -60,6 +60,21 @@ sudo ./restore-stock.sh
 
 If you bricked `wlan0` and the script is unreachable, see [Recovery](#recovery).
 
+
+### Verify it captures real traffic
+
+Once `wlan0` is in monitor mode, run a quick capture and parse it:
+
+```sh
+sudo apt install -y python3-scapy
+sudo tcpdump -i wlan0 -c 200 -w cap.pcap
+python3 examples/parse_monitor_capture.py cap.pcap
+```
+
+You should see beacons from every nearby AP, with SSID + BSSID + frame count.
+That confirms `wlan0` is genuinely in monitor mode and capturing 5GHz/2.4GHz
+traffic.
+
 ## What's in here
 
 ```
