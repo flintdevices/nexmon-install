@@ -200,6 +200,24 @@ This repo ships a firmware build with the `process_frame_hook` C functions remov
 
 Sending the standard CSI configuration IOCTL (cmd 500) sometimes works, sometimes traps the firmware (trap `0x4 @ 0x0022acf2` or similar). The IOCTL handler does a long chain of SHM writes that don't survive the modern driver init. If this happens you need to power-cycle (the auto-revert in `update-alternatives` brings stock Cypress back on next boot).
 
+### Sustained monitor-mode capture hangs the kernel after ~60-90 s
+
+Even with the minimal D10 firmware (CSI patches present, `process_frame_hook` C-side stripped), running `scapy.sniff()` continuously against `wlan0` in monitor mode locks up the BCM43455 SDIO bus within roughly 60-90 seconds. The brcmfmac error handler then loops on SDIO command timeouts and starves the rest of the kernel — SSH stops responding, ICMP stops answering, and the Pi appears dead.
+
+What helps:
+
+- **Enable the BCM2835 hardware watchdog.** It's already on the SoC, just not armed by default. Drop a systemd file at `/etc/systemd/system.conf.d/csipi-hardware-watchdog.conf` with:
+  ```
+  [Manager]
+  RuntimeWatchdogSec=15s
+  RebootWatchdogSec=2min
+  ```
+  systemd will kick `/dev/watchdog0` every ~7.5 s; the hardware fires a hard reset if anything misses that deadline by more than 15 s. From the outside, a kernel hang turns into a 30-second blip instead of a "please walk to the power supply."
+- **Run short capture bursts only.** A few seconds of `tcpdump -i wlan0 -c 5000` is usually fine; sustained `sniff` for minutes is the trigger.
+- **Use a USB adapter (Alfa AWUS036ACH / ath9k_htc) for production capture.** Treat the BCM43455 nexmon stack as the lab toy — handy for exploring CSI internals, not what you want feeding your motion detector at 4 AM.
+
+This is a firmware-side problem, not a driver bug; the same modified `brcmfmac.ko.xz` is rock-solid under normal `wpa_supplicant` workloads.
+
 ### What this does NOT cover
 
 - Pi 5 (use the [official discussion #395 procedure](https://github.com/seemoo-lab/nexmon_csi/discussions/395) — it works).
