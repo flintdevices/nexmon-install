@@ -206,13 +206,7 @@ Even with the minimal D10 firmware (CSI patches present, `process_frame_hook` C-
 
 What helps:
 
-- **Enable the BCM2835 hardware watchdog.** It's already on the SoC, just not armed by default. Drop a systemd file at `/etc/systemd/system.conf.d/csipi-hardware-watchdog.conf` with:
-  ```
-  [Manager]
-  RuntimeWatchdogSec=15s
-  RebootWatchdogSec=2min
-  ```
-  systemd will kick `/dev/watchdog0` every ~7.5 s; the hardware fires a hard reset if anything misses that deadline by more than 15 s. From the outside, a kernel hang turns into a 30-second blip instead of a "please walk to the power supply."
+- **Hardware watchdog (auto-armed by `install.sh`).** The BCM2835 hardware watchdog is on the SoC but isn't armed by default. `install.sh` drops a systemd unit at `/etc/systemd/system.conf.d/csipi-hardware-watchdog.conf` that kicks `/dev/watchdog0` every ~7.5 s; if the kernel misses by more than 15 s the hardware fires a hard reset. From the outside, a kernel hang turns into a ~30-second blip instead of a "please walk to the power supply." Verify with `systemctl show -p RuntimeWatchdogUSec`.
 - **Run short capture bursts only.** A few seconds of `tcpdump -i wlan0 -c 5000` is usually fine; sustained `sniff` for minutes is the trigger.
 - **Use a USB adapter (Alfa AWUS036ACH / ath9k_htc) for production capture.** Treat the BCM43455 nexmon stack as the lab toy — handy for exploring CSI internals, not what you want feeding your motion detector at 4 AM.
 

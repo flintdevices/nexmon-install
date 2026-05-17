@@ -83,6 +83,33 @@ echo "[4/4] Installing helper scripts"
 install -m 755 "$REPO_DIR/load-csi-stack.sh" /usr/local/bin/load-csi-stack
 install -m 755 "$REPO_DIR/restore-stock.sh"  /usr/local/bin/restore-stock
 
+# --- 5. Arm the BCM2835 hardware watchdog (HIGHLY recommended for CSI work) ---
+# Sustained monitor-mode capture can lock the SDIO bus and hang the kernel.
+# With the hw watchdog armed, that hang becomes a 30-second auto-reboot
+# instead of "walk over to the power supply." Idempotent — re-runs are safe.
+
+WD_CONF=/etc/systemd/system.conf.d/csipi-hardware-watchdog.conf
+if [[ ! -f "$WD_CONF" ]]; then
+    echo "[5/5] Arming BCM2835 hardware watchdog (auto-reboot on kernel hang)"
+    mkdir -p "$(dirname "$WD_CONF")"
+    cat > "$WD_CONF" <<'WDEOF'
+[Manager]
+# Hardware watchdog — auto-reboot if the kernel hangs (e.g. nexmon firmware
+# crash starving the SDIO bus). Pi BCM2711 hw watchdog max timeout is ~15s.
+# systemd kicks /dev/watchdog0 every RuntimeWatchdogSec/2.
+RuntimeWatchdogSec=15s
+RebootWatchdogSec=2min
+WDEOF
+    systemctl daemon-reexec
+    if systemctl show -p RuntimeWatchdogUSec --value | grep -q '15s'; then
+        echo "        ✓ watchdog armed (15s timeout)"
+    else
+        echo "        ⚠ watchdog conf written but systemd didn't pick it up — reboot to apply"
+    fi
+else
+    echo "[5/5] Hardware watchdog already configured at $WD_CONF — skipping"
+fi
+
 # --- Done ---
 
 cat <<EOF
@@ -105,4 +132,7 @@ Notes:
     - This is a live driver reload. If it fails, reboot for safety: stock
       Cypress is the configured default (priority 50) and nexmon is priority 30.
     - Keep eth0 plugged in during experimentation.
+    - The BCM2835 hardware watchdog is now armed; sustained monitor-mode
+      capture can hang the kernel after ~60-90s, and the hw watchdog will
+      hard-reset the Pi within 15s of the hang. See README "Known limitations".
 EOF
