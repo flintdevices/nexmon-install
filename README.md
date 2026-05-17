@@ -14,6 +14,8 @@ This is the result of about a week of debugging because every existing guide ass
 | `cfg80211` monitor mode on `wlan0` (`iw dev wlan0 set type monitor`) | ✅ |
 | Capture raw 802.11 frames in 2.4 GHz / 5 GHz with `tcpdump` | ✅ |
 | One-shot deploy/restore scripts | ✅ |
+| Auto-detect firmware on boot, pick interface mode (csi/alfa/both/auto) | ✅ |
+| Watchdog auto-reverts nexmon firmware if motion-detector can't see packets | ✅ |
 | Full `nexmon_csi` UDP/5500 CSI packets (`process_frame_hook` style) | ❌ — see "Known limitations" |
 
 So: this is the **monitor-mode-on-built-in-WiFi** problem solved for Pi 4 + Bookworm. The CSI subcarrier extraction in the canonical nexmon UDP/5500 format is still not solved because of a deep firmware-init crash that the modified driver does not fix. The chip is configured for CSI capture (ucode + size patches active) but no `process_frame_hook` packages CSI into UDP packets. The monitor capture path is usable if you want to write your own parser.
