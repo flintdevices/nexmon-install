@@ -1,0 +1,3 @@
+firmware/*.bin binary
+driver/*.ko.xz binary
+utils/nexutil binary

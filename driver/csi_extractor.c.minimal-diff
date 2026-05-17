@@ -1,0 +1,59 @@
+This is the minimal change to seemoo-lab/nexmon_csi's src/csi_extractor.c
+that makes the firmware boot on Raspberry Pi 4 + kernel 6.12 without trapping.
+
+The change: delete the C function definitions (process_frame_hook,
+create_new_csi_frame, prepend_ethernet_ipv4_udp_header, process_frame_prehook_off0xC,
+process_frame_prehook_off0x8), keeping only the `__attribute__((at()))` patches
+(size patches at 0x1F5768, 0x1F5778, 0x210F56, 0x210F60, and the AMSDU patch at
+0x1B6B02).
+
+Concretely:
+
+  - Keep everything from line 1 (copyright) through the `#include` block.
+  - Keep the `extern void prepend_ethernet_ipv4_udp_header(struct sk_buff *p);`
+    line.
+  - Replace EVERYTHING from "// header of csi frame coming from ucode" up to
+    (but not including) "// Increase d11rxhdr size in initvals (found: below
+    0c 04 02 00)" with a single placeholder comment.
+  - Keep everything from the "// Increase d11rxhdr size in initvals..."
+    comment to end of file unchanged.
+
+This drops about 11 KB of C code. The result is a csi_extractor.c that's
+~6.5 KB, containing only patch attributes and no executable functions.
+
+The chip ends up with:
+  - Bigger d11rxhdr (size patches active)
+  - AMSDU workaround active
+  - Modified ucode loaded (generates CSI markers)
+  - But no nexmon-specific C code in patch RAM
+
+This is what's required for Pi 4 + kernel 6.12 to boot. The chip is still
+configured for CSI capture; just no code to package the data into UDP/5500
+packets.
+
+If you want to reproduce the build:
+
+    cd ~/nexmon/patches/bcm43455c0/7_45_189/nexmon_csi
+    cp src/csi_extractor.c.full src/csi_extractor.c  # restore original
+    python3 - <<'PY'
+    PATH = "src/csi_extractor.c"
+    with open(PATH) as f:
+        src = f.read()
+    prefix_end = src.find("extern void prepend_ethernet_ipv4_udp_header(struct sk_buff *p);")
+    marker = "// Increase d11rxhdr size in initvals"
+    idx = src.find(marker)
+    new_src = (
+        src[:prefix_end]
+        + "extern void prepend_ethernet_ipv4_udp_header(struct sk_buff *p);\n"
+        + "\n"
+        + "// All process_frame_* and create_new_csi_frame functions removed —\n"
+        + "// they crash the firmware during init on Pi 4 + kernel 6.12.\n"
+        + "// Only the __attribute__((at())) patches below remain.\n\n"
+        + src[idx:]
+    )
+    with open(PATH, "w") as f:
+        f.write(new_src)
+    PY
+
+    source ~/nexmon/setup_env.sh
+    make -f Makefile.rpi install-firmware
