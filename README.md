@@ -4,6 +4,18 @@ A working stack for **monitor mode** (and partial CSI groundwork) on the Raspber
 
 This is the result of about a week of debugging because every existing guide assumed kernel 5.x or Pi 5. Pi 4 + kernel 6.12 was a black hole. The artifacts here unblock it.
 
+> ⚠️ **Important practical limitation (2026-05-18)**: sustained monitor-mode capture on
+> this stack crashes the kernel within 60-90 s. Verified across many userspace tunings
+> (libpcap+BPF, channel-hop disable, kernel socket buffer 16 MB, NM unmanage,
+> brcmfmac roamoff=1, `iw set power_save off`). All fail. The crash is silent — no
+> firmware trap, no SDIO error in `dmesg`. Matches openwrt/openwrt#23069 ("BCM43455
+> brcmfmac stuck state, only PSU cold boot recovers" — except we now have a hardware
+> watchdog that handles it). **Use the bounded-burst workflow** in
+> [`findings/2026-05-18-shipped-solution-burst-only-csi.md`](findings/2026-05-18-shipped-solution-burst-only-csi.md):
+> `sudo csipi-csi-burst <seconds>` → captures up to 75 s → auto-reverts to stock
+> firmware. Parse the pcap offline with `utils/analyze_csi_burst_pcap.py` —
+> per-frame RSSI is in the nexmon CSI Ethernet wrapper at byte offset 30.
+
 ## What works
 
 | Capability | Status |
