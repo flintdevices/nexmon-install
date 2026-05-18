@@ -1,9 +1,21 @@
 #!/bin/bash
-# install.sh — install the nexmon CSI stack (firmware + modified brcmfmac + nexutil) on
-# Raspberry Pi 4 + Pi OS Bookworm + kernel 6.12.x.
+# install.sh — install the nexmon CSI stack (firmware + Kali's brcmfmac-nexmon-dkms
+# driver + nexutil) on Raspberry Pi 4 + Pi OS Bookworm + kernel 6.12.x.
 #
-# After install, use load-csi-stack.sh to switch wlan0 to monitor mode, and
-# restore-stock.sh to revert.
+# As of 2026-05-18, the production stack uses Kali Linux's `brcmfmac-nexmon-dkms`
+# package as a drop-in replacement for our previous self-ported brcmfmac. The
+# Kali driver fixes the sustained-monitor-mode kernel hang we'd been chasing
+# for weeks. See findings/2026-05-18-kali-dkms-driver-fixes-sustained-csi.md.
+#
+# The .deb is shipped in the repo at driver/brcmfmac-nexmon-dkms_6.12.2_all.deb
+# (mirrored from https://pkg.kali.org/pkg/brcmfmac-nexmon-dkms).
+#
+# Our D10 nexmon-CSI firmware is still required (Kali's firmware-nexmon
+# package is monitor-only, not CSI-patched), so we install it via
+# update-alternatives the same way we always did.
+#
+# After install, use load-csi-stack.sh (or csipi-mode csi) to switch wlan0
+# to monitor mode, and restore-stock.sh to revert.
 
 set -eu
 
@@ -38,9 +50,9 @@ if [[ ! -e /sys/class/net/eth0 ]]; then
     [[ "$yn" =~ ^[Yy] ]] || exit 3
 fi
 
-# --- 1. Stage the nexmon firmware via update-alternatives ---
+# --- 1. Stage the D10 nexmon-CSI firmware via update-alternatives ---
 
-echo "[1/4] Installing nexmon firmware to /lib/firmware/nexmon/"
+echo "[1/6] Installing D10 nexmon-CSI firmware to /lib/firmware/nexmon/"
 mkdir -p /lib/firmware/nexmon
 cp "$REPO_DIR/firmware/brcmfmac43455-sdio.bin" /lib/firmware/nexmon/brcmfmac43455-sdio.bin
 
@@ -50,21 +62,34 @@ update-alternatives --quiet --install \
     /lib/firmware/nexmon/brcmfmac43455-sdio.bin 30
 
 # Leave the system on stock for now; the user switches via load-csi-stack.sh
+# or csipi-mode csi.
 update-alternatives --quiet --set cyfmac43455-sdio.bin \
     /lib/firmware/cypress/cyfmac43455-sdio-standard.bin
 
-# --- 2. Install the modified brcmfmac driver ---
+# --- 2. Install the Kali brcmfmac-nexmon-dkms driver ---
+# This replaces our former self-ported brcmfmac.ko.xz. The DKMS build
+# auto-recompiles on kernel upgrades, which the self-port did not.
 
-DRIVER_TARGET="/lib/modules/$KERNEL/kernel/drivers/net/wireless/broadcom/brcm80211/brcmfmac/brcmfmac.ko.xz"
-
-if [[ -f "$DRIVER_TARGET" && ! -f "$DRIVER_TARGET.stock-backup" ]]; then
-    echo "[2/4] Backing up stock brcmfmac.ko.xz"
-    cp "$DRIVER_TARGET" "$DRIVER_TARGET.stock-backup"
+KALI_DEB="$REPO_DIR/driver/brcmfmac-nexmon-dkms_6.12.2_all.deb"
+if [[ ! -f "$KALI_DEB" ]]; then
+    echo "ERROR: Kali DKMS driver not found at $KALI_DEB"
+    echo "       Download from https://pkg.kali.org/pkg/brcmfmac-nexmon-dkms"
+    echo "       and drop the .deb into driver/."
+    exit 4
 fi
 
-echo "[2/4] Installing modified brcmfmac.ko.xz"
-cp "$REPO_DIR/driver/brcmfmac.ko.xz" "$DRIVER_TARGET"
-depmod -a
+echo "[2/6] Installing dkms + kernel headers (required to build the DKMS module)"
+# --no-install-recommends avoids pulling in linux-headers-arm64 (Debian package
+# that conflicts with Raspberry Pi OS's raspberrypi-kernel-headers).
+apt-get install -y --no-install-recommends dkms raspberrypi-kernel-headers
+
+echo "[3/6] Installing Kali brcmfmac-nexmon-dkms (DKMS will build against running kernel)"
+# Back up the in-tree driver before DKMS lands the updates/ version on top.
+INTREE="/lib/modules/$KERNEL/kernel/drivers/net/wireless/broadcom/brcm80211/brcmfmac/brcmfmac.ko.xz"
+if [[ -f "$INTREE" && ! -f "$INTREE.stock-backup" ]]; then
+    cp "$INTREE" "$INTREE.stock-backup"
+fi
+dpkg -i "$KALI_DEB"
 
 # --- 3. Install nexutil ---
 
@@ -72,42 +97,48 @@ if [[ -f /usr/bin/nexutil && ! -f /usr/bin/nexutil.stock-backup ]]; then
     cp /usr/bin/nexutil /usr/bin/nexutil.stock-backup
 fi
 
-echo "[3/4] Installing nexutil (USE_VENDOR_CMD=1 build)"
+echo "[4/6] Installing nexutil (USE_VENDOR_CMD=1 build)"
 cp "$REPO_DIR/utils/nexutil" /usr/bin/nexutil
 chmod 755 /usr/bin/nexutil
 setcap cap_net_admin+ep /usr/bin/nexutil
 
 # --- 4. Install scripts ---
 
-echo "[4/4] Installing helper scripts"
+echo "[5/6] Installing helper scripts"
 install -m 755 "$REPO_DIR/load-csi-stack.sh" /usr/local/bin/load-csi-stack
 install -m 755 "$REPO_DIR/restore-stock.sh"  /usr/local/bin/restore-stock
 
-# --- 5. Arm the BCM2835 hardware watchdog (HIGHLY recommended for CSI work) ---
-# Sustained monitor-mode capture can lock the SDIO bus and hang the kernel.
-# With the hw watchdog armed, that hang becomes a 30-second auto-reboot
-# instead of "walk over to the power supply." Idempotent — re-runs are safe.
+# --- 5. Disable BT — D10 minimal firmware does not init BT coexistence cleanly ---
+# Without this, boot enters a watchdog-driven reboot loop when D10 is staged.
+# Our Pi doesn't use BT for anything; this is free.
+
+CONFIG_TXT=/boot/firmware/config.txt
+if [[ -f "$CONFIG_TXT" ]] && ! grep -q "^dtoverlay=disable-bt" "$CONFIG_TXT"; then
+    echo "[6/6] Adding 'dtoverlay=disable-bt' to $CONFIG_TXT (required for D10 CSI firmware)"
+    echo "dtoverlay=disable-bt" >> "$CONFIG_TXT"
+    NEEDS_REBOOT_FOR_BT=1
+else
+    echo "[6/6] dtoverlay=disable-bt already in $CONFIG_TXT — skipping"
+    NEEDS_REBOOT_FOR_BT=0
+fi
+
+# --- 6. Arm the BCM2835 hardware watchdog (defensive — should no longer be
+#        needed now that the Kali driver doesn't hang, but kept for safety) ---
 
 WD_CONF=/etc/systemd/system.conf.d/csipi-hardware-watchdog.conf
 if [[ ! -f "$WD_CONF" ]]; then
-    echo "[5/5] Arming BCM2835 hardware watchdog (auto-reboot on kernel hang)"
+    echo "    Arming BCM2835 hardware watchdog (defensive — auto-reboot on kernel hang)"
     mkdir -p "$(dirname "$WD_CONF")"
     cat > "$WD_CONF" <<'WDEOF'
 [Manager]
-# Hardware watchdog — auto-reboot if the kernel hangs (e.g. nexmon firmware
-# crash starving the SDIO bus). Pi BCM2711 hw watchdog max timeout is ~15s.
-# systemd kicks /dev/watchdog0 every RuntimeWatchdogSec/2.
+# Hardware watchdog — defensive. With the Kali brcmfmac-nexmon-dkms driver the
+# kernel no longer hangs on sustained CSI capture, but the watchdog is cheap
+# insurance against future firmware/driver bugs. systemd kicks /dev/watchdog0
+# every RuntimeWatchdogSec/2 (so this is a no-op when the system is healthy).
 RuntimeWatchdogSec=15s
 RebootWatchdogSec=2min
 WDEOF
     systemctl daemon-reexec
-    if systemctl show -p RuntimeWatchdogUSec --value | grep -q '15s'; then
-        echo "        ✓ watchdog armed (15s timeout)"
-    else
-        echo "        ⚠ watchdog conf written but systemd didn't pick it up — reboot to apply"
-    fi
-else
-    echo "[5/5] Hardware watchdog already configured at $WD_CONF — skipping"
 fi
 
 # --- Done ---
@@ -118,21 +149,25 @@ cat <<EOF
 
 Quick usage:
 
-    sudo load-csi-stack 36           # Switch to nexmon firmware, channel 36 (HT20)
-    sudo load-csi-stack 36 HT40+     # Or with explicit bandwidth/HT40+
+    sudo csipi-mode csi              # Switch to D10 nexmon-CSI firmware (reboots)
+    sudo csipi-mode alfa             # Switch back to stock Cypress (reboots)
 
-    sudo tcpdump -i wlan0 -c 20      # Capture some frames in monitor mode
+    sudo tcpdump -i wlan0 -c 20      # Capture some frames once in CSI mode
     sudo tcpdump -i wlan0 -w cap.pcap
 
-    sudo restore-stock               # Back to stock Cypress + NetworkManager
+    python3 utils/analyze_csi_burst_pcap.py cap.pcap   # decode wrapped frames
 
 Notes:
-    - You currently still have stock Cypress firmware loaded. The above
-      switches to nexmon. wlan0 will lose its connection to your WiFi network.
-    - This is a live driver reload. If it fails, reboot for safety: stock
-      Cypress is the configured default (priority 50) and nexmon is priority 30.
-    - Keep eth0 plugged in during experimentation.
-    - The BCM2835 hardware watchdog is now armed; sustained monitor-mode
-      capture can hang the kernel after ~60-90s, and the hw watchdog will
-      hard-reset the Pi within 15s of the hang. See README "Known limitations".
+    - You currently still have stock Cypress firmware loaded. csipi-mode csi
+      switches to the nexmon CSI firmware (priority 30 in update-alternatives;
+      stock standard is priority 50 = the default).
+    - The Kali brcmfmac-nexmon-dkms driver auto-rebuilds on kernel upgrades —
+      no manual driver step is needed after \`apt upgrade\`.
+    - With the new driver, sustained monitor-mode capture is stable indefinitely
+      (validated 5 min in repo tests). The hw watchdog is kept armed defensively.
 EOF
+
+if [[ "${NEEDS_REBOOT_FOR_BT:-0}" = "1" ]]; then
+    echo
+    echo "  ⚠  REBOOT required to apply dtoverlay=disable-bt: sudo reboot"
+fi

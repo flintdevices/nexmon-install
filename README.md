@@ -4,30 +4,40 @@ A working stack for **monitor mode** (and partial CSI groundwork) on the Raspber
 
 This is the result of about a week of debugging because every existing guide assumed kernel 5.x or Pi 5. Pi 4 + kernel 6.12 was a black hole. The artifacts here unblock it.
 
-> ⚠️ **Important practical limitation (2026-05-18)**: sustained monitor-mode capture on
-> this stack crashes the kernel within 60-90 s. Verified across many userspace tunings
-> (libpcap+BPF, channel-hop disable, kernel socket buffer 16 MB, NM unmanage,
-> brcmfmac roamoff=1, `iw set power_save off`). All fail. The crash is silent — no
-> firmware trap, no SDIO error in `dmesg`. Matches openwrt/openwrt#23069 ("BCM43455
-> brcmfmac stuck state, only PSU cold boot recovers" — except we now have a hardware
-> watchdog that handles it). **Use the bounded-burst workflow** in
-> [`findings/2026-05-18-shipped-solution-burst-only-csi.md`](findings/2026-05-18-shipped-solution-burst-only-csi.md):
-> `sudo csipi-csi-burst <seconds>` → captures up to 75 s → auto-reverts to stock
-> firmware. Parse the pcap offline with `utils/analyze_csi_burst_pcap.py` —
-> per-frame RSSI is in the nexmon CSI Ethernet wrapper at byte offset 30.
+> ✅ **Update 2026-05-18 (afternoon)**: sustained monitor-mode capture now works
+> for hours. The 60-90 s "silent kernel hang" we'd been chasing turned out to be
+> a bug in our self-ported brcmfmac driver, **not** the firmware or chip. Switching
+> the driver to Kali Linux's
+> [`brcmfmac-nexmon-dkms 6.12.2`](https://pkg.kali.org/pkg/brcmfmac-nexmon-dkms)
+> as a drop-in replacement makes the stack rock-solid (validated: 5-min sustained
+> tcpdump @ ~100 fps, 0 kernel errors, per-BSSID RSSI σ matches reality). The
+> DKMS driver auto-rebuilds on kernel upgrades — set-and-forget. The .deb is
+> mirrored in `driver/` and `install.sh` deploys it. Full writeup:
+> [`findings/2026-05-18-kali-dkms-driver-fixes-sustained-csi.md`](findings/2026-05-18-kali-dkms-driver-fixes-sustained-csi.md).
+>
+> The earlier "burst-only" workaround in
+> [`findings/2026-05-18-shipped-solution-burst-only-csi.md`](findings/2026-05-18-shipped-solution-burst-only-csi.md)
+> is preserved as a historical record. `csipi-csi-burst` itself is still useful
+> for harvesting bounded pcaps on demand, but it's no longer required for stability.
+>
+> One config requirement: `install.sh` adds `dtoverlay=disable-bt` to
+> `/boot/firmware/config.txt`. Our D10 minimal firmware doesn't init BT
+> coexistence cleanly; disabling BT is the simplest fix and the Pi doesn't
+> need BT for anything in this project.
 
 ## What works
 
 | Capability | Status |
 |---|---|
 | Boot the nexmon firmware on Pi OS Bookworm + kernel 6.12 | ✅ |
-| Load the modified `brcmfmac` driver (ported to kernel 6.12) | ✅ |
+| Load the brcmfmac driver compatible with kernel 6.12 (Kali DKMS) | ✅ |
 | Use `nexutil` with `USE_VENDOR_CMD=1` | ✅ |
 | `cfg80211` monitor mode on `wlan0` (`iw dev wlan0 set type monitor`) | ✅ |
 | Capture raw 802.11 frames in 2.4 GHz / 5 GHz with `tcpdump` | ✅ |
+| **Sustained monitor-mode capture (5 min+)** | ✅ — fixed 2026-05-18 by Kali DKMS driver |
 | One-shot deploy/restore scripts | ✅ |
 | Auto-detect firmware on boot, pick interface mode (csi/alfa/both/auto) | ✅ |
-| Watchdog auto-reverts nexmon firmware if motion-detector can't see packets | ✅ |
+| Watchdog: heartbeat-based revert if motion-detector can't see packets | ✅ |
 | Full `nexmon_csi` UDP/5500 CSI packets (`process_frame_hook` style) | ❌ — see "Known limitations" |
 
 So: this is the **monitor-mode-on-built-in-WiFi** problem solved for Pi 4 + Bookworm. The CSI subcarrier extraction in the canonical nexmon UDP/5500 format is still not solved because of a deep firmware-init crash that the modified driver does not fix. The chip is configured for CSI capture (ucode + size patches active) but no `process_frame_hook` packages CSI into UDP packets. The monitor capture path is usable if you want to write your own parser.
@@ -38,8 +48,9 @@ So: this is the **monitor-mode-on-built-in-WiFi** problem solved for Pi 4 + Book
 - **OS**: Raspberry Pi OS Bookworm 64-bit
 - **Kernel**: `6.12.75+rpt-rpi-v8`
 - **Firmware**: nexmon-built `7.45.189 (nexmon.org/csi: a975-dirty-1)`, derived from `seemoo-lab/nexmon_csi` master
-- **Driver**: nexmon-modified `brcmfmac` ported from `nexmon/patches/driver/brcmfmac_6.6.y-nexmon` to kernel 6.12 API
+- **Driver**: Kali Linux `brcmfmac-nexmon-dkms 6.12.2` (auto-rebuilds via DKMS on kernel upgrades; our former self-port is preserved at `driver/brcmfmac.ko.xz` as a fallback / reference but is no longer recommended — it has the sustained-capture hang bug)
 - **nexutil**: built with `USE_VENDOR_CMD=1`
+- **BT**: disabled via `dtoverlay=disable-bt` (required for D10 minimal firmware)
 
 ## Quick install
 
@@ -212,17 +223,21 @@ This repo ships a firmware build with the `process_frame_hook` C functions remov
 
 Sending the standard CSI configuration IOCTL (cmd 500) sometimes works, sometimes traps the firmware (trap `0x4 @ 0x0022acf2` or similar). The IOCTL handler does a long chain of SHM writes that don't survive the modern driver init. If this happens you need to power-cycle (the auto-revert in `update-alternatives` brings stock Cypress back on next boot).
 
-### Sustained monitor-mode capture hangs the kernel after ~60-90 s
+### ~~Sustained monitor-mode capture hangs the kernel after ~60-90 s~~ — fixed 2026-05-18
 
-Even with the minimal D10 firmware (CSI patches present, `process_frame_hook` C-side stripped), running `scapy.sniff()` continuously against `wlan0` in monitor mode locks up the BCM43455 SDIO bus within roughly 60-90 seconds. The brcmfmac error handler then loops on SDIO command timeouts and starves the rest of the kernel — SSH stops responding, ICMP stops answering, and the Pi appears dead.
+**Resolved.** This was a bug in our self-ported brcmfmac driver, not in the firmware
+or the chip. Replacing the driver with Kali Linux's
+[`brcmfmac-nexmon-dkms 6.12.2`](https://pkg.kali.org/pkg/brcmfmac-nexmon-dkms)
+makes sustained capture rock-solid (validated 5-min runs in repo tests). The Kali
+maintainers have done the kernel 6.12 driver work properly and ship it as a DKMS
+package that auto-rebuilds on kernel upgrades. `install.sh` now deploys the Kali
+.deb (mirrored at `driver/brcmfmac-nexmon-dkms_6.12.2_all.deb`).
 
-What helps:
+The hardware watchdog and the `csipi-nexmon-watchdog` heartbeat path are kept
+armed as defensive measures, but with the new driver they should never fire.
 
-- **Hardware watchdog (auto-armed by `install.sh`).** The BCM2835 hardware watchdog is on the SoC but isn't armed by default. `install.sh` drops a systemd unit at `/etc/systemd/system.conf.d/csipi-hardware-watchdog.conf` that kicks `/dev/watchdog0` every ~7.5 s; if the kernel misses by more than 15 s the hardware fires a hard reset. From the outside, a kernel hang turns into a ~30-second blip instead of a "please walk to the power supply." Verify with `systemctl show -p RuntimeWatchdogUSec`.
-- **Run short capture bursts only.** A few seconds of `tcpdump -i wlan0 -c 5000` is usually fine; sustained `sniff` for minutes is the trigger.
-- **Use a USB adapter (Alfa AWUS036ACH / ath9k_htc) for production capture.** Treat the BCM43455 nexmon stack as the lab toy — handy for exploring CSI internals, not what you want feeding your motion detector at 4 AM.
-
-This is a firmware-side problem, not a driver bug; the same modified `brcmfmac.ko.xz` is rock-solid under normal `wpa_supplicant` workloads.
+Full investigation:
+[`findings/2026-05-18-kali-dkms-driver-fixes-sustained-csi.md`](findings/2026-05-18-kali-dkms-driver-fixes-sustained-csi.md).
 
 ### What this does NOT cover
 

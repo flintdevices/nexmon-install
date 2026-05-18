@@ -2,7 +2,15 @@
 
 Date: 2026-05-18
 Author: Peter Koczan
-Status: SHIPPED. This is the practical answer after a full session of attempted fixes.
+Status: **SUPERSEDED** by `2026-05-18-kali-dkms-driver-fixes-sustained-csi.md`.
+
+> Update (later same day): the sustained-capture crash documented below
+> turned out to be a bug in our self-ported brcmfmac driver, not a
+> fundamental limitation of the BCM43455+nexmon stack. Switching to
+> Kali Linux's `brcmfmac-nexmon-dkms 6.12.2` package as a drop-in
+> replacement makes 5-min+ sustained CSI capture rock-solid. This
+> document is preserved as a historical record of what was tried before
+> we found the fix.
 
 ## Why this is the answer
 
