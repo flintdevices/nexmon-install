@@ -57,8 +57,8 @@ So: this is the **monitor-mode-on-built-in-WiFi** problem solved for Pi 4 + Book
 **Before you do anything, plug in an Ethernet cable.** This stack swaps the WiFi firmware live. If anything goes wrong, `wlan0` is gone — you need eth0 to recover.
 
 ```sh
-git clone https://github.com/peterkoczan/raspberry-pi-4-wifi-csi-pi-os-bookworm.git
-cd raspberry-pi-4-wifi-csi-pi-os-bookworm
+git clone https://github.com/flintdevices/nexmon-install.git
+cd nexmon-install
 sudo ./install.sh
 ```
 
