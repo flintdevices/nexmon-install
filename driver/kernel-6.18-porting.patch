@@ -1,0 +1,113 @@
+--- a/brcmfmac-nexmon-6.12.2/bcmsdh.c
++++ b/brcmfmac-nexmon-6.12.2/bcmsdh.c
+@@ -991,7 +991,7 @@
+ 	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_4359),
+ 	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_CYPRESS_4373),
+ 	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_CYPRESS_43012),
+-	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_CYPRESS_43752),
++	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_43752),
+ 	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_CYPRESS_89359),
+ 	{ /* end: all zeroes */ }
+ };
+--- a/brcmfmac-nexmon-6.12.2/btcoex.c
++++ b/brcmfmac-nexmon-6.12.2/btcoex.c
+@@ -272,7 +272,7 @@
+  */
+ static void brcmf_btcoex_timerfunc(struct timer_list *t)
+ {
+-	struct brcmf_btcoex_info *bt_local = from_timer(bt_local, t, timer);
++	struct brcmf_btcoex_info *bt_local = timer_container_of(bt_local, t, timer);
+ 	brcmf_dbg(TRACE, "enter\n");
+
+ 	bt_local->timer_on = false;
+@@ -289,7 +289,7 @@
+ 	btci = container_of(work, struct brcmf_btcoex_info, work);
+ 	if (btci->timer_on) {
+ 		btci->timer_on = false;
+-		del_timer_sync(&btci->timer);
++		timer_delete_sync(&btci->timer);
+ 	}
+
+ 	switch (btci->bt_state) {
+@@ -394,7 +394,7 @@
+
+ 	if (cfg->btcoex->timer_on) {
+ 		cfg->btcoex->timer_on = false;
+-		del_timer_sync(&cfg->btcoex->timer);
++		timer_delete_sync(&cfg->btcoex->timer);
+ 	}
+
+ 	cancel_work_sync(&cfg->btcoex->work);
+@@ -428,7 +428,7 @@
+ 	if (btci->timer_on) {
+ 		brcmf_dbg(INFO, "disable BT DHCP Timer\n");
+ 		btci->timer_on = false;
+-		del_timer_sync(&btci->timer);
++		timer_delete_sync(&btci->timer);
+
+ 		/* schedule worker if transition to IDLE is needed */
+ 		if (btci->bt_state != BRCMF_BT_DHCP_IDLE) {
+--- a/brcmfmac-nexmon-6.12.2/cfg80211.c
++++ b/brcmfmac-nexmon-6.12.2/cfg80211.c
+@@ -827,7 +827,7 @@
+ 	cfg->scan_request = NULL;
+
+ 	if (timer_pending(&cfg->escan_timeout))
+-		del_timer_sync(&cfg->escan_timeout);
++		timer_delete_sync(&cfg->escan_timeout);
+
+ 	if (fw_abort) {
+ 		/* Do a scan abort to stop the driver's scan engine */
+@@ -1317,7 +1317,7 @@
+ 	return err;
+ }
+
+-static s32 brcmf_cfg80211_set_wiphy_params(struct wiphy *wiphy, u32 changed)
++static int brcmf_cfg80211_set_wiphy_params(struct wiphy *wiphy, int radio_idx, u32 changed)
+ {
+ 	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
+ 	struct net_device *ndev = cfg_to_ndev(cfg);
+@@ -2323,9 +2323,9 @@
+ 	return err;
+ }
+
+-static s32
++static int
+ brcmf_cfg80211_set_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev,
+-			    enum nl80211_tx_power_setting type, s32 mbm)
++			    int radio_idx, enum nl80211_tx_power_setting type, int mbm)
+ {
+ 	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
+ 	struct net_device *ndev = cfg_to_ndev(cfg);
+@@ -2374,9 +2374,9 @@
+ 	return err;
+ }
+
+-static s32
++static int
+ brcmf_cfg80211_get_tx_power(struct wiphy *wiphy, struct wireless_dev *wdev,
+-			    s32 *dbm)
++			    int radio_idx, unsigned int link_id, int *dbm)
+ {
+ 	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
+ 	struct brcmf_cfg80211_vif *vif = wdev_to_vif(wdev);
+@@ -3278,7 +3278,7 @@
+ static void brcmf_escan_timeout(struct timer_list *t)
+ {
+ 	struct brcmf_cfg80211_info *cfg =
+-			from_timer(cfg, t, escan_timeout);
++			timer_container_of(cfg, t, escan_timeout);
+ 	struct brcmf_pub *drvr = cfg->pub;
+
+ 	if (cfg->int_escan_map || cfg->scan_request) {
+--- a/brcmfmac-nexmon-6.12.2/sdio.c
++++ b/brcmfmac-nexmon-6.12.2/sdio.c
+@@ -4299,7 +4299,7 @@
+
+ 		switch (sdiod->func1->device) {
+ 		case SDIO_DEVICE_ID_BROADCOM_CYPRESS_4373:
+-		case SDIO_DEVICE_ID_BROADCOM_CYPRESS_43752:
++		case SDIO_DEVICE_ID_BROADCOM_43752:
+ 			brcmf_dbg(INFO, "set F2 watermark to 0x%x*4 bytes\n",
+ 				  CY_4373_F2_WATERMARK);
+ 			brcmf_sdiod_writeb(sdiod, SBSDIO_WATERMARK,

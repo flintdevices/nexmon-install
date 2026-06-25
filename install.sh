@@ -29,11 +29,17 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 # --- Sanity checks ---
 
 KERNEL=$(uname -r)
-if [[ "$KERNEL" != 6.12.* ]]; then
-    echo "WARNING: this stack is tested on kernel 6.12.x. You're on $KERNEL."
-    echo "         Continuing anyway, but expect breakage."
-    sleep 2
-fi
+KERNEL_MAJOR_MINOR=$(echo "$KERNEL" | grep -oE '^[0-9]+\.[0-9]+')
+
+case "$KERNEL_MAJOR_MINOR" in
+    6.12|6.18)
+        ;;
+    *)
+        echo "WARNING: this stack is tested on kernel 6.12.x and 6.18.x. You're on $KERNEL."
+        echo "         Continuing anyway, but expect breakage."
+        sleep 2
+        ;;
+esac
 
 if [[ ! -f /lib/firmware/cypress/cyfmac43455-sdio-standard.bin ]]; then
     echo "ERROR: stock Cypress firmware not found at"
@@ -89,7 +95,26 @@ INTREE="/lib/modules/$KERNEL/kernel/drivers/net/wireless/broadcom/brcm80211/brcm
 if [[ -f "$INTREE" && ! -f "$INTREE.stock-backup" ]]; then
     cp "$INTREE" "$INTREE.stock-backup"
 fi
-dpkg -i "$KALI_DEB"
+dpkg -i "$KALI_DEB" || true   # may fail on first run if DKMS build fails; we patch below
+
+# On kernel 6.16+ the timer API changed (del_timer_sync→timer_delete_sync,
+# from_timer→timer_container_of) and several cfg80211_ops signatures gained a
+# radio_idx parameter. The Kali 6.12.2 DKMS source needs a small patch to
+# compile on kernel 6.18. Apply it now and trigger a rebuild.
+DKMS_SRC="/usr/src/brcmfmac-nexmon-6.12.2"
+PATCH_6_18="$REPO_DIR/driver/kernel-6.18-porting.patch"
+KERNEL_MAJOR_MINOR_NUM=$(echo "$KERNEL_MAJOR_MINOR" | tr -d '.')
+
+if [[ -d "$DKMS_SRC" && -f "$PATCH_6_18" && "$KERNEL_MAJOR_MINOR_NUM" -ge 616 ]]; then
+    if ! grep -q "timer_delete_sync" "$DKMS_SRC/cfg80211.c" 2>/dev/null; then
+        echo "    Applying kernel-6.18-porting.patch to DKMS source..."
+        patch -p1 -d /usr/src < "$PATCH_6_18"
+        dkms build  brcmfmac-nexmon/6.12.2 -k "$KERNEL"
+        dkms install brcmfmac-nexmon/6.12.2 -k "$KERNEL"
+    else
+        echo "    kernel-6.18-porting.patch already applied — skipping"
+    fi
+fi
 
 # --- 3. Install nexutil ---
 
