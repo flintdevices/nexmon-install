@@ -144,7 +144,8 @@ install -m 755 "$REPO_DIR/restore-stock.sh"  /usr/local/bin/restore-stock
 CONFIG_TXT=/boot/firmware/config.txt
 if [[ -f "$CONFIG_TXT" ]] && ! grep -q "^dtoverlay=disable-bt" "$CONFIG_TXT"; then
     echo "[6/6] Adding 'dtoverlay=disable-bt' to $CONFIG_TXT (required for D10 CSI firmware)"
-    echo "dtoverlay=disable-bt" >> "$CONFIG_TXT"
+    # Marked so flint's restore-to-stock path removes only the line we added.
+    echo "dtoverlay=disable-bt   # flint-nexmon" >> "$CONFIG_TXT"
     NEEDS_REBOOT_FOR_BT=1
 else
     echo "[6/6] dtoverlay=disable-bt already in $CONFIG_TXT — skipping"
