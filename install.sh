@@ -84,9 +84,44 @@ if [[ ! -f "$KALI_DEB" ]]; then
 fi
 
 echo "[2/6] Installing dkms + kernel headers (required to build the DKMS module)"
+# apt's package index may be empty/stale (fresh image, or install.sh run before
+# any other apt command) — that alone produces "Unable to locate package" for
+# every name below, so refresh it first.
+apt-get update -q
+
 # --no-install-recommends avoids pulling in linux-headers-arm64 (Debian package
 # that conflicts with Raspberry Pi OS's raspberrypi-kernel-headers).
-apt-get install -y --no-install-recommends dkms raspberrypi-kernel-headers patch
+apt-get install -y --no-install-recommends dkms patch
+
+# raspberrypi-kernel-headers only exists on Raspberry Pi OS's own vendor-kernel
+# repo. Devices running a mainline/Debian-provided kernel (or a Pi OS suite
+# where that repo hasn't published headers yet) need the generic
+# linux-headers-$(uname -r) package instead. Try both rather than hard-failing
+# on the first one that apt doesn't know about.
+if apt-cache show raspberrypi-kernel-headers >/dev/null 2>&1; then
+    apt-get install -y --no-install-recommends raspberrypi-kernel-headers
+elif apt-cache show "linux-headers-$KERNEL" >/dev/null 2>&1; then
+    echo "    raspberrypi-kernel-headers not found in apt — using linux-headers-$KERNEL"
+    apt-get install -y --no-install-recommends "linux-headers-$KERNEL"
+else
+    echo "ERROR: no matching kernel headers package found for kernel $KERNEL" >&2
+    echo "       Tried: raspberrypi-kernel-headers, linux-headers-$KERNEL" >&2
+    echo "       Run 'apt-cache search linux-headers' and install the matching" >&2
+    echo "       package manually, then re-run this script." >&2
+    exit 6
+fi
+
+# The package name existing in apt doesn't guarantee it matches the *running*
+# kernel (e.g. a headers package for an older/newer point release). DKMS needs
+# a real build tree, so fail clearly here instead of deep inside `dkms build`.
+if [[ ! -e "/lib/modules/$KERNEL/build" ]]; then
+    echo "ERROR: /lib/modules/$KERNEL/build is missing after installing headers." >&2
+    echo "       Installed kernel headers don't match the running kernel ($KERNEL)." >&2
+    echo "       This usually means the headers package is out of sync with the" >&2
+    echo "       running kernel — try 'apt-get update && apt-get upgrade' and reboot," >&2
+    echo "       or install headers matching $KERNEL manually." >&2
+    exit 7
+fi
 
 echo "[3/6] Installing Kali brcmfmac-nexmon-dkms (DKMS will build against running kernel)"
 # Back up the in-tree driver before DKMS lands the updates/ version on top.
