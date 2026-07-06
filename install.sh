@@ -29,8 +29,13 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 # --- Sanity checks ---
 
 KERNEL=$(uname -r)
-if [[ "$KERNEL" != 6.12.* ]]; then
-    echo "WARNING: this stack is tested on kernel 6.12.x. You're on $KERNEL."
+KVER=${KERNEL%%[!0-9.]*}             # strip suffix, e.g. 6.18.34
+KMAJ=${KVER%%.*}                     # 6
+KMIN=${KVER#*.}; KMIN=${KMIN%%.*}    # 18
+# 6.12 is the reference kernel. 6.13-6.18 build via driver/kernel-6.18-porting.patch
+# (applied automatically below). Anything outside that range is untested.
+if [[ "$KMAJ" != 6 || "$KMIN" -lt 12 || "$KMIN" -gt 18 ]]; then
+    echo "WARNING: this stack is validated on kernel 6.12-6.18. You're on $KERNEL."
     echo "         Continuing anyway, but expect breakage."
     sleep 2
 fi
@@ -81,7 +86,7 @@ fi
 echo "[2/6] Installing dkms + kernel headers (required to build the DKMS module)"
 # --no-install-recommends avoids pulling in linux-headers-arm64 (Debian package
 # that conflicts with Raspberry Pi OS's raspberrypi-kernel-headers).
-apt-get install -y --no-install-recommends dkms raspberrypi-kernel-headers
+apt-get install -y --no-install-recommends dkms raspberrypi-kernel-headers patch
 
 echo "[3/6] Installing Kali brcmfmac-nexmon-dkms (DKMS will build against running kernel)"
 # Back up the in-tree driver before DKMS lands the updates/ version on top.
@@ -89,18 +94,42 @@ INTREE="/lib/modules/$KERNEL/kernel/drivers/net/wireless/broadcom/brcm80211/brcm
 if [[ -f "$INTREE" && ! -f "$INTREE.stock-backup" ]]; then
     cp "$INTREE" "$INTREE.stock-backup"
 fi
-dpkg -i "$KALI_DEB"
+# DKMS AUTOINSTALL builds the module immediately. On kernels newer than 6.12
+# that first build fails until the porting patch is applied, so tolerate a
+# non-zero exit here and rebuild from patched source below.
+dpkg -i "$KALI_DEB" || true
+
+# Locate the DKMS source tree the .deb just unpacked and apply the kernel
+# 6.13-6.18 compatibility port (version-gated; a no-op on 6.12). Idempotent.
+NEXMON_SRC=$(ls -d /usr/src/brcmfmac-nexmon-*/ 2>/dev/null | head -n1)
+if [[ -z "$NEXMON_SRC" ]]; then
+    echo "ERROR: brcmfmac-nexmon DKMS source not found under /usr/src" >&2
+    exit 5
+fi
+NEXVER=$(basename "${NEXMON_SRC%/}" | sed 's/^brcmfmac-nexmon-//')
+if ! grep -q "nexmon 6.18 port" "$NEXMON_SRC/cfg80211.c"; then
+    echo "    Applying kernel 6.13-6.18 porting patch"
+    patch -p1 -d "$NEXMON_SRC" < "$REPO_DIR/driver/kernel-6.18-porting.patch"
+fi
+
+# (Re)build and install the module against the running kernel from patched source.
+dkms build   --force -m brcmfmac-nexmon -v "$NEXVER"
+dkms install --force -m brcmfmac-nexmon -v "$NEXVER"
+
+# Reconcile dpkg state (postinst DKMS steps now succeed against the patched tree).
+dpkg --configure -a || true
 
 # --- 3. Install nexutil ---
+# flint detects nexmon by probing /usr/local/bin/nexutil and applies its
+# capability bits there (flint-caps.service), so install to that path.
 
-if [[ -f /usr/bin/nexutil && ! -f /usr/bin/nexutil.stock-backup ]]; then
-    cp /usr/bin/nexutil /usr/bin/nexutil.stock-backup
+if [[ -f /usr/local/bin/nexutil && ! -f /usr/local/bin/nexutil.stock-backup ]]; then
+    cp /usr/local/bin/nexutil /usr/local/bin/nexutil.stock-backup
 fi
 
 echo "[4/6] Installing nexutil (USE_VENDOR_CMD=1 build)"
-cp "$REPO_DIR/utils/nexutil" /usr/bin/nexutil
-chmod 755 /usr/bin/nexutil
-setcap cap_net_admin+ep /usr/bin/nexutil
+install -m 755 "$REPO_DIR/utils/nexutil" /usr/local/bin/nexutil
+setcap cap_net_admin+ep /usr/local/bin/nexutil
 
 # --- 4. Install scripts ---
 
